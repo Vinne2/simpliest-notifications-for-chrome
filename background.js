@@ -3,6 +3,8 @@
 			http://developer.chrome.com/extensions/i18n.html
 	TODO: if Interval>60000 → localStorage['…-TimerDelay']=Interval/60000
 			+ similar changes in chrome.alarms.create()
+	TIPS: if script gets killed while waiting for an operation, try:
+	 → https://developer.chrome.com/docs/extensions/develop/migrate/to-service-workers?hl=pl#keep-sw-alive
 */
 /*
  * FBnotifier by Kaligula
@@ -57,18 +59,18 @@ function clog(txt,type){
  */
 var waitBadgeTimer=[];
 function waitBadge(){
-	chrome.browserAction.setBadgeBackgroundColor({color:[155,155,155,255]}); // grey
+	chrome.action.setBadgeBackgroundColor({color:[155,155,155,255]}); // grey
 	var nr=window.setInterval(waitBadgeRoller,250);
 	waitBadgeTimer.push( nr );
 }
 function waitBadgeRoller(){
 	var arr=['/','–','\\','|'];
 	if(this.cnt==undefined)this.cnt=0;
-	chrome.browserAction.setBadgeText({text:arr[this.cnt]});
+	chrome.action.setBadgeText({text:arr[this.cnt]});
 	this.cnt=(this.cnt<3?this.cnt+1:0);
 }
 function clearTimer(){
-	for (i=0;i<waitBadgeTimer.length;i++){ //sometimes check is performed on start then old alarm goes off or two old alarms go off
+	for (var i=0;i<waitBadgeTimer.length;i++){ //sometimes check is performed on start then old alarm goes off or two old alarms go off
 		window.clearInterval(waitBadgeTimer[i]);
 	}
 	return i+' waitBadgeTimer interval'+(i==1?'':'s')+' cleared.';
@@ -83,7 +85,7 @@ chrome.alarms.onAlarm.addListener(check);
  *  TEMPORARY
  *  clear obsolete alarm 'reloadAlarm'
  */
-if (!localStorage['FBnotifier-obsolete-reloadAlarm']) {
+if ( !chrome.storage.local.get(['FBnotifier-obsolete-reloadAlarm']) ) {
 	chrome.alarms.get(
 		'reloadAlarm',
 		function(a){
@@ -94,7 +96,7 @@ if (!localStorage['FBnotifier-obsolete-reloadAlarm']) {
 			} else {
 				clog('Not cleared:\ntypeof a == '+typeof a+'\na == '+a+'\nProbably it\'s not present anymore. Good!');
 			}
-			localStorage['FBnotifier-obsolete-reloadAlarm'] = 1; // 1 = true = consider it done
+			chrome.storage.local.set({'FBnotifier-obsolete-reloadAlarm' : 1}); // 1 = true = consider it done
 		}
 	);
 }
@@ -105,12 +107,8 @@ if (!localStorage['FBnotifier-obsolete-reloadAlarm']) {
 function start(){
 
 	// read user settings
-	Protocol = (localStorage['FBnotifier-settings-Https']=='false')?'http:':'https:';
-	UseNewTab = (localStorage['FBnotifier-settings-UseNewTab']=='true')?true:false;
-	Interval = (+localStorage['FBnotifier-settings-TimerDelay']||300000); // 5 mins
-	Sound = (localStorage['FBnotifier-settings-PlayRingtone']=='false')?false:true;
-		Ringtone = new Audio('notif.mp3');
-	if (!localStorage['FBnotifier-counter']) localStorage['FBnotifier-counter'] = '0';
+	const Interval = await (+(chrome.storage.local.get(['FBnotifier-settings-TimerDelay']))||300000); // 5 mins
+	if (!chrome.storage.local.get(['FBnotifier-counter'])) chrome.storage.local.set({'FBnotifier-counter' : '0'});
 	clog('I loaded user settings successfully!');
 
 	// read or set 'checkAlarm'
@@ -149,9 +147,9 @@ function start(){
 function getAlarms(){
 	chrome.alarms.getAll(
 		function(a){
-			l=a.length;
+			var l=a.length;
 			clog(l+' alarm'+(l>1?'s':'')+':');
-			for (i=1;i<=l;i++){
+			for (var i=1;i<=l;i++){
 				clog('→ time of '+i+(i==1?'st':(i==2?'nd':(i==3?'rd':(i>3?'th':''))))+': '+new Date(a[0].scheduledTime));
 			}
 			clog(a);
@@ -160,35 +158,37 @@ function getAlarms(){
 }
 
 
-var alreadyChecking = false;
+chrome.storage.local.set({'alreadyChecking' : false});
 /*
  *  check if Facebook is already on active tab
  */
 function check(){
+	var alreadyChecking = await chrome.storage.local.get(['alreadyChecking']);
 	if (!alreadyChecking){
+		var btnClkd = await chrome.storage.local.get(['btnClkd']);
 		if (!btnClkd){ // button not clicked
 			clog('Alarm went off. Checking if Facebook is on active tab.');
-			chrome.tabs.getSelected(null,function(tab){
-				var g=tab.url.indexOf('facebook.com');
-				clog('Active tab object:');
-				console.log(tab);
-				clog('tab.url.indexOf(\'facebook.com\')=='+g);
+			chrome.tabs.query({'active':true},function(tab){
+				var g=tab[0].url.indexOf('facebook.com');
+				clog('Active tab[0] object:');
+				console.log(tab[0]);
+				clog('tab[0].url.indexOf(\'facebook.com\')=='+g);
 				if(g==-1||g>12){ //'facebook.com' may be at most at 13th place: [https://www.f] <- 'f' is 13th char
 					clog('Connecting…');
 					var now=new Date();
 					//localStorage['FBnotifier-lastCheck'] = now.valueOf();
-					chrome.browserAction.setTitle({title:'Connecting ('+now.toLocaleTimeString()+')'});
+					chrome.action.setTitle({title:'Connecting ('+now.toLocaleTimeString()+')'});
 					waitBadge();
 					checkNotifications();
 				} else {
-					clog('Assuming Facebook is on selected tab, so check is not performed.');
+					clog('Assuming Facebook is on selected tab[0], so check is not performed.');
 					clearButton();
 					clog('Counters cleared.');
 				}
 			});
 		} else { // button clicked
 			clog('Alarm went off but meantime button was clicked. Not checking.');
-			btnClkd = false;
+			chrome.storage.local.set({'btnClkd' : false});
 		}
 	} else {
 		clog('alreadyChecking == '+alreadyChecking);
@@ -199,27 +199,22 @@ function check(){
  *  get Facebook page and check/count notifications
  */
 function checkNotifications(){
-	window.alreadyChecking = true;
+	chrome.storage.local.set({'alreadyChecking' : true});
 	clog('Getting page…');
-	var xhr=new XMLHttpRequest();
-	xhr.open('GET',Protocol+'//mbasic.facebook.com/menu/bookmarks/',true); // this page on FB has relatively least size (Chrome console: 20.8 KB resources, 9.7 KB transfered)
-	xhr.onreadystatechange=function(){
-
-		clog('xhr.readyState = '+xhr.readyState);
-
-		if(xhr.readyState==4){
+	const Protocol = await (chrome.storage.local.get(['FBnotifier-settings-Https'])=='false')?'http:':'https:';
+	const response = await fetch(Protocol+'//mbasic.facebook.com/menu/bookmarks/'); // this page on FB has relatively least size (Chrome console: 20.8 KB resources, 9.7 KB transfered)
 
 			clog( clearTimer() );
 
-			if(xhr.responseText.match('<div id="viewport"')){
+			if(response.statusText.match('<div id="viewport"')){
 				
-				chrome.browserAction.setIcon({path:'images/icon.png'});
+				chrome.action.setIcon({path:'images/icon.png'});
 
-				var fReqRX=xhr.responseText.match(/(?:<a accesskey="\d+" href="\/friends.*?>)([^<].*?)(?:(?:<\/a>)|(?:<.*?>\()(\d+)(?:\)<.*?><\/a>))/);
+				var fReqRX=response.statusText.match(/(?:<a accesskey="\d+" href="\/friends.*?>)([^<].*?)(?:(?:<\/a>)|(?:<.*?>\()(\d+)(?:\)<.*?><\/a>))/);
 					var fReq= ( fReqRX ? (+(fReqRX[2])||0) : 0 );
-				var fMesRX=xhr.responseText.match(/(?:<a accesskey="\d+" href="\/messages.*?>)([^<].*?)(?:(?:<\/a>)|(?:<.*?>\()(\d+)(?:\)<.*?><\/a>))/);
+				var fMesRX=response.statusText.match(/(?:<a accesskey="\d+" href="\/messages.*?>)([^<].*?)(?:(?:<\/a>)|(?:<.*?>\()(\d+)(?:\)<.*?><\/a>))/);
 					var fMes= ( fMesRX ? (+(fMesRX[2])||0) : 0 );
-				var fNotRX=xhr.responseText.match(/(?:<a accesskey="\d+" href="\/notifications.*?>)([^<].*?)(?:(?:<\/a>)|(?:<.*?>\()(\d+)(?:\)<.*?><\/a>))/);
+				var fNotRX=response.statusText.match(/(?:<a accesskey="\d+" href="\/notifications.*?>)([^<].*?)(?:(?:<\/a>)|(?:<.*?>\()(\d+)(?:\)<.*?><\/a>))/);
 					var fNot= ( fNotRX ? (+(fNotRX[2])||0) : 0 );
 				
 				var counter=fReq+fMes+fNot;
@@ -230,41 +225,42 @@ function checkNotifications(){
 						if (fReq>0) badgeTitle+='\n – '+decode_entities(fReq+' '+fReqRX[1]);
 						if (fMes>0) badgeTitle+='\n – '+decode_entities(fMes+' '+fMesRX[1]);
 						if (fNot>0) badgeTitle+='\n – '+decode_entities(fNot+' '+fNotRX[1]);
-					chrome.browserAction.setTitle({title:badgeTitle});
-					chrome.browserAction.setBadgeText({text:''+counter});
-					chrome.browserAction.setBadgeBackgroundColor({color:[208,0,24,255]}); // GMail red // it was green rgb(0,204,51) before
+					chrome.action.setTitle({title:badgeTitle});
+					chrome.action.setBadgeText({text:''+counter});
+					chrome.action.setBadgeBackgroundColor({color:[208,0,24,255]}); // GMail red // it was green rgb(0,204,51) before
 					clog('Button properties have been set.');
-					if (Sound && (counter>(+localStorage['FBnotifier-counter']))) {
-						clog('Ringtone played.');
+					const Sound = await (chrome.storage.local.get(['FBnotifier-settings-PlayRingtone'])=='false')?false:true;
+					if (Sound && (counter>(+(chrome.storage.local.get(['FBnotifier-counter']))))) {
+						const Ringtone = new Audio('notif.mp3');
+						clog('Ringtone plays…');
 						Ringtone.play();
+						clog('…ringtone played.');
 					}
-					localStorage['FBnotifier-counter'] = counter;
+					chrome.storage.local.set({'FBnotifier-counter' : counter});
 				} else {
 					clog('Clearing button.');
 					clearButton();
 				}
 			} else {
-				clog('xhr.responseText doesn\'t match string \"notifications_jewel\".','error')
-				chrome.browserAction.setIcon({path:'images/icon-offline.png'});
-				chrome.browserAction.setTitle({title:'Disconnected ('+(new Date()).toLocaleTimeString()+')'});
-				chrome.browserAction.setBadgeBackgroundColor({color:[155,155,155,255]}); //grey
-				chrome.browserAction.setBadgeText({text:'?'});
+				clog('response.statusText doesn\'t match string \"notifications_jewel\".','error')
+				chrome.action.setIcon({path:'images/icon-offline.png'});
+				chrome.action.setTitle({title:'Disconnected ('+(new Date()).toLocaleTimeString()+')'});
+				chrome.action.setBadgeBackgroundColor({color:[155,155,155,255]}); //grey
+				chrome.action.setBadgeText({text:'?'});
 				clog('Button properties set as \"Disconnected\".');
 				return;
 			}
-			alreadyChecking = false;
-		} else return;
-	}
-	xhr.send(null);
+			chrome.storage.local.set({'alreadyChecking' : false});
+
 }
 
 /*
  *  restore blank button badge and counter=0
  */
 function clearButton() {
-	chrome.browserAction.setBadgeText({text:''});
-	chrome.browserAction.setTitle({title:'Last check ('+(new Date()).toLocaleTimeString()+')'});
-	localStorage['FBnotifier-counter'] = '0';
+	chrome.action.setBadgeText({text:''});
+	chrome.action.setTitle({title:'Last check ('+(new Date()).toLocaleTimeString()+')'});
+	chrome.storage.local.set({'FBnotifier-counter' : '0'});
 	clearInterval(waitBadgeTimer);
 	clog('Button cleared.');
 }
@@ -272,12 +268,14 @@ function clearButton() {
 /*
  *  button onClick event
  */
-window.btnClkd = false;
-chrome.browserAction.onClicked.addListener(function(tab){
+chrome.storage.local.set({'btnClkd' : false});
+chrome.action.onClicked.addListener(function(tab){
 	clog('Button clicked.');
-	window.btnClkd = true;
+	chrome.storage.local.set({'btnClkd' : true});
+	const Protocol = await (chrome.storage.local.get(['FBnotifier-settings-Https'])=='false')?'http:':'https:';
 	var uri=Protocol+'//www.facebook.com/';
 	chrome.windows.getAll({populate:true},function(windows){
+		const UseNewTab = await (chrome.storage.local.get(['FBnotifier-settings-UseNewTab'])=='true')?true:false;
 		if (!UseNewTab){
 			clog('Looking for opened Facebook tab. Otherwise will open Facebook in new tab.');
 			for(var i=0;i<windows.length;i++){
@@ -293,9 +291,9 @@ chrome.browserAction.onClicked.addListener(function(tab){
 			}
 		}
 		clog('Opening Facebook in new tab (or active newtab).');
-		chrome.tabs.getSelected(null,function(tab){
-			if(tab.url=='chrome://newtab/'){
-				chrome.tabs.update(tab.id,{url:uri});
+		chrome.tabs.query({'active':true},function(tab){
+			if(tab[0].url=='chrome://newtab/'){
+				chrome.tabs.update(tab[0].id,{url:uri});
 			}
 			else {
 				chrome.tabs.create({url:uri,selected:true});
